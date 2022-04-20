@@ -1,10 +1,10 @@
 from flask import Flask
-from flask_restful import Resource, Api
+from flask_restful import Resource, Api, reqparse, abort
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy import text
-
 import datetime
+import sql_query
 
 app = Flask(__name__)
 api = Api(app)
@@ -16,88 +16,49 @@ Base = automap_base()
 Base.prepare(db.engine, reflect=True)
 job = Base.classes.job
 
-last_day_of_prev_month = datetime.date.today().replace(day=1) - \
-    datetime.timedelta(days=1)
-first_day_of_prev_month = datetime.date.today().replace(
-    day=1) - datetime.timedelta(days=last_day_of_prev_month.day)
+# Add request parser
+req_parser = reqparse.RequestParser()
+req_parser.add_argument('limit', type=int, required=False, location="args", help="The limit should be greater than 0 and less than 100.")
+req_parser.add_argument('page', type=int, required=False, location="args", help="The page number should be greater than 1.")
+req_parser.add_argument('sort', type=str, required=False, location="args", help="The sort column name should be in the string form.")
+req_parser.add_argument('from', type=str, required=False, location="args", help="Please enter a valid from date.")
+req_parser.add_argument('to', type=str, required=False, location="args", help="Please enter a valid to date.")
 
 
 class ReportResource(Resource):
     def get(self):
         report = []
-        sql_query = text("""
-        SELECT 
-            num_of_tests,
-            num_of_fail,
-            test_start_date,
-            pdd_score,
-            country_id,
-            country_name,
-            call_description_id
-        FROM
-            (
-                SELECT
-                    COUNT(A.id) AS num_of_tests,
-                    NULL AS num_of_fail,
-                    A.test_start_date,
-                    A.pdd_score,
-                    A.country_id,
-                    A.country_name,
-                    A.call_description_id
-                FROM (
-                SELECT
-                    jp.id as id,
-                    jp.id AS job_id, 
-                    strftime('%d-%m-%Y', jp.call_start_time) AS test_start_date,
-                    ROUND((julianday(jp.call_connect_time) - julianday(jp.call_start_time)) * 86400) as pdd_score,
-                    jp.call_description_id,
-                    cc.id AS country_id,
-                    cc.country_name AS country_name
-                FROM job_processing AS jp
-                JOIN number AS num ON num.id = jp.number_id
-                JOIN country_code AS cc ON cc.id = num.country_code_id
-                WHERE 
-                    jp.call_start_time >= :first_day_of_prev_month AND 
-                    jp.call_start_time <= :last_day_of_prev_month 
-                ) AS A
-                WHERE A.call_description_id IS NULL
-                GROUP BY A.country_id, strftime('%d-%m-%Y', cast(A.test_start_date as date))
+        
+        args = req_parser.parse_args()
+        lower_limit = 0
+        upper_limit = 20
+        
+        # Change Limit (default is 20)
+        lower_limit = 0
+        if args['limit'] is not None and args['limit'] < 100:
+            upper_limit = args['limit']
+        else:
+            upper_limit = 20
+            
+        # Change page number
+        if args['page'] is not None and args['page'] > 1:
+            lower_limit = upper_limit
+            
+        if args['from'] is not None and args['to'] is not None:
+            try:
+                from_date = datetime.datetime.strptime(args["from"], "%Y-%m-%d")
+                to_date = datetime.datetime.strptime(args["to"], "%Y-%m-%d")
+            except Exception as err:
+                abort(400, message="Invalid From or To date provided. {}".format(err))
+        else:
+            from_date = sql_query.first_day_of_prev_month
+            to_date = sql_query.last_day_of_prev_month
 
-            UNION 
-                SELECT
-                    NULL AS num_of_tests,
-                    COUNT(A.id) AS num_of_fail,
-                    A.test_start_date,
-                    A.pdd_score,
-                    A.country_id,
-                    A.country_name,
-                    A.call_description_id
-                FROM (
-                SELECT
-                    jp.id as id,
-                    jp.id AS job_id, 
-                    strftime('%d-%m-%Y', jp.call_start_time) AS test_start_date,
-                    ROUND((julianday(jp.call_connect_time) - julianday(jp.call_start_time)) * 86400) as pdd_score,
-                    jp.call_description_id,
-                    cc.id AS country_id,
-                    cc.country_name AS country_name
-                FROM job_processing AS jp
-                JOIN number AS num ON num.id = jp.number_id
-                JOIN country_code AS cc ON cc.id = num.country_code_id
-                WHERE 
-                    jp.call_start_time >= :first_day_of_prev_month AND 
-                    jp.call_start_time <= :last_day_of_prev_month
-                ) AS A
-                WHERE A.call_description_id IS NOT NULL
-                GROUP BY A.country_id, strftime('%d-%m-%Y', cast(A.test_start_date as date))
-            )
-        ORDER BY
-            test_start_date
-        """)
-
-        obj_executed = db.engine.execute(sql_query, {
-            "first_day_of_prev_month": first_day_of_prev_month,
-            "last_day_of_prev_month" : last_day_of_prev_month
+        obj_executed = db.engine.execute(sql_query.sql_query, {
+            "first_day_of_prev_month": from_date,
+            "last_day_of_prev_month" : to_date,
+            "lower_limit": lower_limit,
+            "upper_limit": upper_limit
         })
         results = obj_executed.fetchall()
 
@@ -108,9 +69,12 @@ class ReportResource(Resource):
             data["num_of_fails"] = result.num_of_fail
             data["pdd_score"] = result.pdd_score
             data["country_name"] = result.country_name
+            data["company_name"] = result.company_name
+            data["connection_score"] = result.connection_score
 
             report.append(data)
 
+        print(len(report))
         return report
 
 
